@@ -1,0 +1,150 @@
+import pandas as pd
+import numpy as np
+import requests
+import streamlit as st
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import pickle
+import os
+
+# Configuration
+DATA_URL = "https://raw.githubusercontent.com/amitkulkarni9/Movie-Recommendation-System/main/tmdb_5000_movies.csv"
+POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
+API_KEY = "YOUR_TMDB_API_KEY"  # Replace with your actual TMDB API key
+
+# Load and preprocess data
+@st.cache_data
+def load_data():
+    try:
+        # Try to load from local file first
+        if os.path.exists('movies.pkl'):
+            movies = pd.read_pickle('movies.pkl')
+        else:
+            movies = pd.read_csv(DATA_URL)
+            # Save to pickle for faster loading next time
+            movies.to_pickle('movies.pkl')
+        
+        # Basic preprocessing
+        movies['genres'] = movies['genres'].fillna('[]')
+        movies['keywords'] = movies['keywords'].fillna('[]')
+        movies['overview'] = movies['overview'].fillna('')
+        
+        return movies
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return None
+
+# Create TF-IDF matrix
+@st.cache_data
+def create_similarity_matrix(movies):
+    try:
+        # Combine features for TF-IDF
+        movies['combined_features'] = movies['genres'] + ' ' + movies['keywords'] + ' ' + movies['overview']
+        
+        # Create TF-IDF vectorizer
+        tfidf = TfidfVectorizer(stop_words='english')
+        tfidf_matrix = tfidf.fit_transform(movies['combined_features'])
+        
+        # Compute cosine similarity matrix
+        cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
+        return cosine_sim
+    except Exception as e:
+        st.error(f"Error creating similarity matrix: {e}")
+        return None
+
+# Get movie poster from TMDB API
+def get_poster(movie_id):
+    try:
+        url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={API_KEY}"
+        response = requests.get(url)
+        data = response.json()
+        poster_path = data.get('poster_path')
+        if poster_path:
+            return f"{POSTER_BASE_URL}{poster_path}"
+        return None
+    except:
+        return None
+
+# Get recommendations
+def get_recommendations(title, movies, cosine_sim, num_recommendations=5):
+    try:
+        # Get the index of the movie that matches the title
+        idx = movies[movies['title'] == title].index[0]
+        
+        # Get the pairwise similarity scores of all movies with that movie
+        sim_scores = list(enumerate(cosine_sim[idx]))
+        
+        # Sort the movies based on the similarity scores
+        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+        
+        # Get the scores of the top N most similar movies (skip the first one as it's the same movie)
+        sim_scores = sim_scores[1:num_recommendations+1]
+        
+        # Get the movie indices and similarity scores
+        movie_indices = [i[0] for i in sim_scores]
+        similarity_scores = [i[1] for i in sim_scores]
+        
+        # Return the top N most similar movies with their similarity scores
+        recommendations = movies.iloc[movie_indices].copy()
+        recommendations['similarity'] = similarity_scores
+        recommendations['poster_url'] = recommendations['id'].apply(get_poster)
+        
+        return recommendations
+    except Exception as e:
+        st.error(f"Error getting recommendations: {e}")
+        return None
+
+# Streamlit UI
+def main():
+    st.title("🎬 AI-Powered Movie Recommendation System")
+    st.write("Discover movies you'll love based on your favorites!")
+    
+    # Load data
+    movies = load_data()
+    if movies is None:
+        return
+    
+    # Create similarity matrix
+    cosine_sim = create_similarity_matrix(movies)
+    if cosine_sim is None:
+        return
+    
+    # Movie selection
+    movie_list = movies['title'].values
+    selected_movie = st.selectbox(
+        "Select a movie you like:",
+        movie_list,
+        index=100,  # Default to a popular movie
+        help="Start typing to search for a movie"
+    )
+    
+    # Number of recommendations
+    num_recommendations = st.slider(
+        "Number of recommendations:",
+        min_value=3,
+        max_value=10,
+        value=5
+    )
+    
+    # Get recommendations button
+    if st.button("Get Recommendations"):
+        with st.spinner('Finding similar movies...'):
+            recommendations = get_recommendations(selected_movie, movies, cosine_sim, num_recommendations)
+            
+            if recommendations is not None and not recommendations.empty:
+                st.success(f"Because you liked **{selected_movie}**, you might enjoy:")
+                
+                # Display recommendations in a grid
+                cols = st.columns(3)
+                for i, (_, row) in enumerate(recommendations.iterrows()):
+                    with cols[i % 3]:
+                        if row['poster_url']:
+                            st.image(row['poster_url'], width=150)
+                        st.write(f"**{row['title']}**")
+                        st.write(f"Similarity: {row['similarity']:.2f}")
+                        st.write(f"Genres: {row['genres']}")
+            else:
+                st.warning("Couldn't find recommendations. Please try another movie.")
+
+if __name__ == "__main__":
+    main()
